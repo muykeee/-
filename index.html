@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火柴人对战</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #f0f0f0;
+            min-height: 100vh;
+            touch-action: none;
+        }
+        canvas {
+            border: 1px solid black;
+            display: block;
+            margin: 10px auto;
+            background: #fff;
+            max-width: 100%;
+            height: auto;
+        }
+        #gameInfo {
+            text-align: center;
+            font-size: clamp(16px, 4vw, 24px);
+            font-family: Arial, sans-serif;
+            margin-bottom: 10px;
+            width: 100%;
+            padding: 0 10px;
+            box-sizing: border-box;
+        }
+        #retryButton {
+            display: none;
+            margin: 10px auto;
+            padding: 10px 20px;
+            font-size: clamp(16px, 4vw, 20px);
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            touch-action: manipulation;
+        }
+        #retryButton:hover {
+            background-color: #45a049;
+        }
+        @media (max-width: 600px) {
+            body {
+                padding: 5px;
+            }
+            canvas {
+                margin: 5px auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="gameInfo">关卡: 1 | 分数: 0 | 剩余敌人: 1</div>
+    <canvas id="gameCanvas"></canvas>
+    <button id="retryButton" onclick="restartGame()">重新开始</button>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const gameInfoElement = document.getElementById('gameInfo');
+        const retryButton = document.getElementById('retryButton');
+
+        let score = 0;
+        let level = 1;
+        let mouseDown = false;
+        let touchStartPos = null;
+        let drawPower = 0;
+        let maxDrawPower = 40;
+        let gameOver = false;
+        let arrows = [];
+        let enemyArrows = [];
+        let platforms = [];
+        let targets = [];
+        let platformPositions = [];
+
+        let player = {
+            x: 0,
+            y: 0,
+            rotation: 0,
+            width: 30,
+            height: 60,
+            lastShotTime: 0
+        };
+
+        class Arrow {
+            constructor(x, y, dx, dy, isEnemy = false) {
+                this.x = x;
+                this.y = y;
+                this.dx = dx;
+                this.dy = dy;
+                this.isEnemy = isEnemy;
+                this.active = true;
+            }
+
+            update() {
+                if (!this.active) return;
+                
+                let nextX = this.x + this.dx * 0.5;
+                let nextY = this.y + this.dy * 0.5;
+
+                for (let platform of platforms) {
+                    if (this.lineIntersectsRect(
+                        this.x, this.y, nextX, nextY,
+                        platform.x, platform.y, platform.width, platform.height
+                    )) {
+                        this.active = false;
+                        return;
+                    }
+                }
+
+                this.x = nextX;
+                this.y = nextY;
+                this.dy += 0.1;
+            }
+
+            lineIntersectsRect(x1, y1, x2, y2, rx, ry, rw, rh) {
+                let left = rx;
+                let right = rx + rw;
+                let top = ry;
+                let bottom = ry + rh;
+
+                if ((x1 >= left && x1 <= right && y1 >= top && y1 <= bottom) ||
+                    (x2 >= left && x2 <= right && y2 >= top && y2 <= bottom)) {
+                    return true;
+                }
+
+                let lines = [
+                    {x1: left, y1: top, x2: right, y2: top},
+                    {x1: right, y1: top, x2: right, y2: bottom},
+                    {x1: right, y1: bottom, x2: left, y2: bottom},
+                    {x1: left, y1: bottom, x2: left, y2: top}
+                ];
+
+                for (let line of lines) {
+                    if (this.lineIntersectsLine(x1, y1, x2, y2, line.x1, line.y1, line.x2, line.y2)) {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            lineIntersectsLine(x1, y1, x2, y2, x3, y3, x4, y4) {
+                let denominator = ((x2 - x1) * (y4 - y3)) - ((y2 - y1) * (x4 - x3));
+                if (denominator === 0) return false;
+
+                let ua = (((x4 - x3) * (y1 - y3)) - ((y4 - y3) * (x1 - x3))) / denominator;
+                let ub = (((x2 - x1) * (y1 - y3)) - ((y2 - y1) * (x1 - x3))) / denominator;
+
+                return (ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1);
+            }
+
+            draw() {
+                if (!this.active) return;
+                
+                const fontSize = Math.min(canvas.width * 0.033, 20);
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(Math.atan2(this.dy, this.dx));
+                ctx.font = `${fontSize}px Arial`;
+                ctx.fillText(this.isEnemy ? '💩' : '🍊', 0, 0);
+                ctx.restore();
+            }
+        }
+
+        class Target {
+            constructor(platformIndex) {
+                this.platformIndex = platformIndex;
+                this.width = canvas.width * 0.05;
+                this.height = canvas.height * 0.15;
+                this.lastShotTime = 0;
+                this.shotDelay = Math.max(4000 - (level - 1) * 200, 2000);
+                this.alive = true;
+                this.resetPosition();
+            }
+
+            resetPosition() {
+                const platform = platforms[this.platformIndex];
+                this.x = platform.x + platform.width/2;
+                this.y = platform.y - this.height/2;
+            }
+
+            shoot() {
+                if (!this.alive) return;
+                
+                if (Date.now() - this.lastShotTime > this.shotDelay && !gameOver) {
+                    this.lastShotTime = Date.now();
+                    
+                    let accuracy = Math.min(0.5, 0.05 + (level * 0.03));
+                    let angle = Math.atan2(player.y - this.y, player.x - this.x);
+                    angle += (Math.random() - 0.5) * (2 - accuracy) * Math.PI;
+                    
+                    let power = 6 + (level * 0.2);
+                    let dx = Math.cos(angle) * power;
+                    let dy = Math.sin(angle) * power;
+                    
+                    enemyArrows.push(new Arrow(this.x, this.y, dx, dy, true));
+                }
+            }
+
+            draw() {
+                if (!this.alive) return;
+                
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                
+                ctx.beginPath();
+                ctx.strokeStyle = 'red';
+                ctx.lineWidth = Math.max(2, canvas.width * 0.003);
+                
+                const headRadius = this.width/3;
+                ctx.arc(0, -this.height/2 + headRadius, headRadius, 0, Math.PI * 2);
+                ctx.moveTo(0, -this.height/2 + headRadius * 2);
+                ctx.lineTo(0, this.height/2 - headRadius);
+                ctx.moveTo(-this.width/2, -this.height/2 + this.height/3);
+                ctx.lineTo(this.width/2, -this.height/2 + this.height/3);
+                ctx.moveTo(0, this.height/2 - headRadius);
+                ctx.lineTo(-this.width/3, this.height/2);
+                ctx.moveTo(0, this.height/2 - headRadius);
+                ctx.lineTo(this.width/3, this.height/2);
+                
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+
+        function resizeCanvas() {
+            const maxWidth = Math.min(800, window.innerWidth - 20);
+            const aspectRatio = 3/2;
+            canvas.width = maxWidth;
+            canvas.height = maxWidth / aspectRatio;
+            
+            player.x = canvas.width * 0.1;
+            player.y = canvas.height * 0.875;
+
+            platformPositions = [
+                { x: canvas.width * 0.5, y: canvas.height * 0.75 },
+                { x: canvas.width * 0.75, y: canvas.height * 0.5 },
+                { x: canvas.width * 0.83, y: canvas.height * 0.25 },
+                { x: canvas.width * 0.33, y: canvas.height * 0.625 },
+                { x: canvas.width * 0.58, y: canvas.height * 0.375 }
+            ];
+
+            if (!gameOver) {
+                initLevel();
+            }
+        }
+
+        function generatePlatforms() {
+            let numPlatforms = Math.min(2 + Math.floor(level/2), platformPositions.length);
+            platforms = [];
+            for(let i = 0; i < numPlatforms; i++) {
+                platforms.push({
+                    x: platformPositions[i].x,
+                    y: platformPositions[i].y,
+                    width: canvas.width * 0.13,
+                    height: canvas.height * 0.05
+                });
+            }
+        }
+
+        function initLevel() {
+            generatePlatforms();
+            let numTargets = Math.min(1 + Math.floor((level - 1) / 2), platforms.length);
+            targets = [];
+            for(let i = 0; i < numTargets; i++) {
+                targets.push(new Target(i));
+            }
+            updateGameInfo();
+        }
+
+        function drawPlayer() {
+            ctx.save();
+            ctx.translate(player.x, player.y);
+            ctx.rotate(player.rotation);
+            
+            ctx.beginPath();
+            ctx.strokeStyle = 'blue';
+            ctx.lineWidth = Math.max(2, canvas.width * 0.003);
+            
+            const scale = canvas.width * 0.001;
+            const headRadius = 10 * scale;
+            const bodyLength = 30 * scale;
+            const armLength = 15 * scale;
+            const legLength = 20 * scale;
+            
+            ctx.arc(0, -headRadius, headRadius, 0, Math.PI * 2);
+            ctx.moveTo(0, 0);
+            ctx.lineTo(0, bodyLength);
+            ctx.moveTo(0, bodyLength);
+            ctx.lineTo(-legLength/2, bodyLength + legLength);
+            ctx.moveTo(0, bodyLength);
+            ctx.lineTo(legLength/2, bodyLength + legLength);
+            
+            if (!mouseDown) {
+                ctx.moveTo(-armLength, bodyLength/2);
+                ctx.lineTo(armLength, bodyLength/2);
+            } else {
+                let drawDistance = -drawPower * 0.5;
+                ctx.moveTo(drawDistance, bodyLength/2);
+                ctx.lineTo(armLength, bodyLength/2);
+                ctx.beginPath();
+                ctx.arc(armLength, bodyLength/2, armLength, -Math.PI/2, Math.PI/2);
+                ctx.moveTo(armLength, bodyLength/2 - armLength);
+                ctx.lineTo(drawDistance, bodyLength/2);
+                ctx.lineTo(armLength, bodyLength/2 + armLength);
+            }
+            
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        function drawPlatforms() {
+            ctx.fillStyle = '#8B4513';
+            platforms.forEach(platform => {
+                ctx.fillRect(platform.x, platform.y, platform.width, platform.height);
+            });
+        }
+
+        function checkCollisions() {
+            enemyArrows = enemyArrows.filter(arrow => {
+                if (!arrow.active) return false;
+                if (Math.abs(arrow.x - player.x) < player.width/2 &&
+                    Math.abs(arrow.y - player.y) < player.height/2) {
+                    endGame();
+                    return false;
+                }
+                return arrow.x > 0 && arrow.x < canvas.width && arrow.y < canvas.height;
+            });
+
+            arrows = arrows.filter(arrow => {
+                if (!arrow.active) return false;
+                let hit = false;
+                targets.forEach(target => {
+                    if (target.alive && 
+                        Math.abs(arrow.x - target.x) < target.width/2 &&
+                        Math.abs(arrow.y - target.y) < target.height/2) {
+                        target.alive = false;
+                        score += 10;
+                        hit = true;
+                        checkLevelProgress();
+                    }
+                });
+                return !hit && arrow.x > 0 && arrow.x < canvas.width && arrow.y < canvas.height;
+            });
+        }
+
+        function checkLevelProgress() {
+            let remainingTargets = targets.filter(target => target.alive).length;
+            if (remainingTargets === 0) {
+                level++;
+                initLevel();
+            }
+            updateGameInfo();
+        }
+
+        function updateGameInfo() {
+            let remainingTargets = targets.filter(target => target.alive).length;
+            gameInfoElement.textContent = `关卡: ${level} | 分数: ${score} | 剩余敌人: ${remainingTargets}`;
+        }
+
+        function endGame() {
+            gameOver = true;
+            retryButton.style.display = 'block';
+        }
+
+        function restartGame() {
+            gameOver = false;
+            score = 0;
+            level = 1;
+            arrows = [];
+            enemyArrows = [];
+            retryButton.style.display = 'none';
+            initLevel();
+        }
+
+        function drawGameOver() {
+            if (gameOver) {
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = 'white';
+                ctx.font = `${canvas.width * 0.08}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.fillText('游戏结束', canvas.width/2, canvas.height/2);
+                ctx.font = `${canvas.width * 0.04}px Arial`;
+                ctx.fillText(`最终分数: ${score} | 达到关卡: ${level}`, canvas.width/2, canvas.height/2 + canvas.height * 0.1);
+            }
+        }
+
+        function getPointerPos(e) {
+            let rect = canvas.getBoundingClientRect();
+            let x, y;
+            if (e.touches) {
+                x = e.touches[0].clientX - rect.left;
+                y = e.touches[0].clientY - rect.top;
+            } else {
+                x = e.clientX - rect.left;
+                y = e.clientY - rect.top;
+            }
+            return {
+                x: x * (canvas.width / rect.width),
+                y: y * (canvas.height / rect.height)
+            };
+        }
+
+        function handlePointerMove(e) {
+            if (!gameOver) {
+                e.preventDefault();
+                let pos = getPointerPos(e);
+                player.rotation = Math.atan2(pos.y - player.y, pos.x - player.x);
+            }
+        }
+
+        function handlePointerStart(e) {
+            if (!gameOver) {
+                e.preventDefault();
+                mouseDown = true;
+                if (e.touches) {
+                    touchStartPos = getPointerPos(e);
+                }
+            }
+        }
+
+        function handlePointerEnd(e) {
+            if (!gameOver && mouseDown) {
+                e.preventDefault();
+                let power = drawPower / 2;
+                let dx = Math.cos(player.rotation) * power;
+                let dy = Math.sin(player.rotation) * power;
+                arrows.push(new Arrow(player.x, player.y, dx, dy));
+            }
+            mouseDown = false;
+            touchStartPos = null;
+            drawPower = 0;
+        }
+
+        function gameLoop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (!gameOver) {
+                if (mouseDown) {
+                    drawPower = Math.min(drawPower + 0.5, maxDrawPower);
+                }
+
+                drawPlatforms();
+                
+                targets.forEach(target => {
+                    target.shoot();
+                    target.draw();
+                });
+
+                arrows.forEach(arrow => {
+                    arrow.update();
+                    arrow.draw();
+                });
+
+                enemyArrows.forEach(arrow => {
+                    arrow.update();
+                    arrow.draw();
+                });
+
+                checkCollisions();
+            }
+
+            drawPlayer();
+            drawGameOver();
+            
+            requestAnimationFrame(gameLoop);
+        }
+
+        canvas.addEventListener('mousemove', handlePointerMove);
+        canvas.addEventListener('mousedown', handlePointerStart);
+        canvas.addEventListener('mouseup', handlePointerEnd);
+        canvas.addEventListener('touchstart', handlePointerStart, { passive: false });
+        canvas.addEventListener('touchmove', handlePointerMove, { passive: false });
+        canvas.addEventListener('touchend', handlePointerEnd, { passive: false });
+        canvas.addEventListener('touchcancel', handlePointerEnd, { passive: false });
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+        gameLoop();
+    </script>
+</body>
+</html>
